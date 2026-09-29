@@ -171,7 +171,11 @@ class Game:
                 raise ValueError("No puedes pasar: hay una apuesta pendiente")
 
         elif action == Action.CALL:
-            self._commit(player, to_call)
+            if to_call == 0:
+                # Igualar sin apuesta pendiente es un check.
+                pass
+            else:
+                self._commit(player, to_call)
 
         elif action in (Action.BET, Action.RAISE):
             if to_call == 0 and self.current_bet > 0 and action == Action.BET:

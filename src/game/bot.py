@@ -61,7 +61,7 @@ class FunctionBot(Bot):
 class BotEngine:
     """Pregunta a cada bot y aplica sus decisiones hasta acabar la mano."""
 
-    def __init__(self, game, bots, max_steps: int = 1000):
+    def __init__(self, game, bots, max_steps: int = 1000, on_action=None):
         if len(bots) != game.seats:
             raise ValueError(
                 f"Se esperaban {game.seats} bots, se recibieron {len(bots)}"
@@ -70,6 +70,9 @@ class BotEngine:
         self.bots = list(bots)
         self.max_steps = max_steps
         self.history: list = []
+        # Callback opcional tras aplicar una acción: recibe un dict con los
+        # datos del evento (útil para exportar la mano).
+        self.on_action = on_action
 
     def play_hand(self):
         self.game.start_hand()
@@ -116,12 +119,26 @@ class BotEngine:
     def _apply(self, seat, decision: Decision):
         game = self.game
         applied = decision
+        state_before = game.state
         try:
             game.act(decision.action, decision.amount)
         except (ValueError, RuntimeError):
             applied = self._safe_action(game)
             game.act(applied.action, applied.amount)
         self.history.append((game.hand_number, seat, applied.action, applied.amount))
+
+        if self.on_action is not None:
+            player = game.players[seat]
+            self.on_action(
+                {
+                    "hand_number": game.hand_number,
+                    "seat": seat,
+                    "state_before": state_before,
+                    "action": applied,
+                    "stack_after": player.getChips(),
+                    "pot_after": game.pot,
+                }
+            )
 
     def _safe_action(self, game) -> Decision:
         """Acción conservadora cuando un bot falla o devuelve algo ilegal."""
