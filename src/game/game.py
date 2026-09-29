@@ -111,10 +111,13 @@ class Game:
             self._finish_betting()
 
     # ------------------------------------------------------------------ turnos
+    def currentSeat(self):
+        """Índice del jugador al que le toca actuar, o None."""
+        return self.to_act[0] if self.to_act else None
+
     def currentPlayer(self):
-        if not self.to_act:
-            return None
-        return self.players[self.to_act[0]]
+        seat = self.currentSeat()
+        return None if seat is None else self.players[seat]
 
     def act(self, action, amount: int = 0):
         """Aplica una acción del jugador de turno.
