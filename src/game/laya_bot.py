@@ -200,6 +200,12 @@ class LayaBot(Bot):
         action = legal[key][0]
         if action in (Action.BET, Action.RAISE):
             amount = self._chosen_raise(game, answers)
+            # Si el tamaño elegido es el stack completo, la acción real es
+            # all-in.
+            seat = game.currentSeat()
+            player = game.players[seat]
+            if amount >= player.getChips() + player.getCurrentBet():
+                return Decision(Action.ALL_IN)
             return Decision(action, int(amount))
         return Decision(action)
 
@@ -253,7 +259,12 @@ class LayaBot(Bot):
                     self.prompt.action_description("raise", **values),
                 )
 
-        if player.getChips() > 0:
+        # El all-in solo aparece como acción principal si el prompt lo permite o
+        # si es la única forma de seguir en la mano.
+        puede_subir = "bet" in options or "raise" in options
+        if player.getChips() > 0 and (
+            self.prompt.offer_all_in_as_action or not puede_subir
+        ):
             options["all_in"] = (
                 Action.ALL_IN,
                 self.prompt.action_description("all_in", **values),
@@ -262,7 +273,13 @@ class LayaBot(Bot):
         return options
 
     def _raise_sizes(self, game):
-        """dict: clave -> (importe, descripción) con tamaños de subida legales."""
+        """dict: clave -> (importe, descripción) con tamaños de subida legales.
+
+        El tamaño se expresa como el total al que sube la apuesta en la calle.
+        Los importes se acotan al stack efectivo (no al propio) para que el
+        rival pueda igualarlos, y el ``all_in`` solo se ofrece cuando el stack
+        efectivo es pequeño (≤ 2 botes).
+        """
         seat = game.currentSeat()
         player = game.players[seat]
         to_call = max(0, game.current_bet - player.getCurrentBet())
@@ -272,23 +289,50 @@ class LayaBot(Bot):
         if player.getChips() <= 0 or max_to < min_to:
             return {}
 
-        pot_after_call = game.pot + to_call
+        rivales = [p for p in game.players if p.isActive() and p is not player]
+        stack_rival = min([p.getChips() for p in rivales], default=0)
+        # El stack efectivo: lo máximo que realmente puede ponerse en juego
+        # contra el rival más corto.
+        stack_efectivo = (
+            min(player.getChips(), stack_rival) if rivales else player.getChips()
+        )
+        # Nadie pagará más de lo que tiene el rival más corto (salvo su propio
+        # stack, que es el límite duro).
+        techo = min(max_to, game.current_bet + stack_rival) if rivales else max_to
+        bote = game.pot + to_call
+
+        # Un "pot raise" sube al importe actual más el bote tras igualar.
+        pot_raise = game.current_bet + to_call + game.pot
         raw = {
             "minimum": min_to,
-            "half_pot": game.current_bet + round(0.5 * pot_after_call),
-            "three_quarter_pot": game.current_bet + round(0.75 * pot_after_call),
-            "pot": game.current_bet + pot_after_call,
-            "all_in": max_to,
+            "half_pot": game.current_bet + round(0.5 * bote),
+            "three_quarter_pot": game.current_bet + round(0.75 * bote),
+            "pot": pot_raise,
         }
 
         sizes = {}
         seen = set()
         for key, amount in raw.items():
-            amount = max(min_to, min(int(amount), max_to))
+            amount = max(min_to, min(int(amount), techo))
             if amount in seen:
                 continue
             seen.add(amount)
             sizes[key] = (amount, self.prompt.size_description(key, amount=amount))
+
+        # El all-in, como tamaño, solo tiene sentido si el stack efectivo es
+        # pequeño respecto al bote. Se ofrece por el stack efectivo (lo que el
+        # rival puede igualar), no por el stack propio.
+        all_in_to = game.current_bet + stack_efectivo
+        if (
+            stack_efectivo <= 2 * max(bote, 1)
+            and all_in_to > game.current_bet
+            and all_in_to not in seen
+        ):
+            sizes["all_in"] = (
+                all_in_to,
+                self.prompt.size_description("all_in", amount=all_in_to),
+            )
+
         return sizes
 
     def _fallback(self, game) -> Decision:

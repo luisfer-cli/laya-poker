@@ -149,11 +149,87 @@ class LayaBotDecisionTests(unittest.TestCase):
         self.assertEqual(decision.action, Action.RAISE)
         self.assertEqual(decision.amount, esperado)
 
-    def test_elige_all_in(self):
-        agent = FakeAgent({"answers": {"action": {"choice": "all_in"}}})
+    def test_all_in_por_tamano_con_stack_corto(self):
+        # Con el stack efectivo pequeño (≤ 2 botes), el all-in sí es un tamaño
+        # disponible; elegirlo produce un ALL_IN.
+        game = new_game(count=3, chips=60)
+        game.start(shuffle=False)
+        agent = FakeAgent(
+            {
+                "answers": {
+                    "action": {"choice": "raise"},
+                    "bet_size": {"choice": "all_in"},
+                }
+            }
+        )
         bot = LayaBot(agent)
 
-        self.assertEqual(bot.decide(self.game).action, Action.ALL_IN)
+        decision = bot.decide(game)
+
+        self.assertEqual(decision.action, Action.ALL_IN)
+
+    def test_tamano_all_in_ausente_con_stack_largo(self):
+        # En un bote pequeño con stacks grandes, comprometer el stack entero no
+        # es una jugada natural y no debe ofrecerse como tamaño.
+        game = new_game(count=3, chips=1000)
+        game.start(shuffle=False)
+        bot = LayaBot(FakeAgent())
+
+        sizes = bot._raise_sizes(game)
+
+        self.assertNotIn("all_in", sizes)
+        # Ningún tamaño ofrecido supera el stack del jugador.
+        max_to = game.players[game.currentSeat()].getChips()
+        for amount, _ in sizes.values():
+            self.assertLessEqual(amount, max_to)
+
+    def test_tamano_no_supera_lo_que_el_rival_puede_pagar(self):
+        # Si el rival más corto tiene 300, no tiene sentido proponer tamaños
+        # muy por encima de su stack.
+        game = Game(
+            [Player("A", 1000), Player("B", 300), Player("C", 300)],
+            small_blind=5,
+            big_blind=10,
+        )
+        game.start(shuffle=False)
+        bot = LayaBot(FakeAgent())
+        # Forzamos un bote grande para que el tope por bote no sea el límite.
+        game.pot = 500
+        game.current_bet = 0
+
+        sizes = bot._raise_sizes(game)
+
+        for amount, _ in sizes.values():
+            self.assertLessEqual(amount, game.current_bet + 300)
+
+    def test_all_in_no_aparece_como_accion_principal(self):
+        bot = LayaBot(FakeAgent())
+
+        criteria = bot.build_questions(self.game)["action"]["criteria"]
+
+        self.assertNotIn("all_in", criteria)
+        self.assertIn("raise", criteria)
+
+    def test_all_in_disponible_si_no_se_puede_subir(self):
+        # Alguien con muy pocas fichas solo puede ir all-in para seguir.
+        game = new_game(count=3, chips=1000)
+        game.start(shuffle=False)
+        game.players[0].setChips(15)  # no llega a la subida mínima (a 20)
+        bot = LayaBot(FakeAgent())
+
+        criteria = bot.build_questions(game)["action"]["criteria"]
+
+        self.assertIn("all_in", criteria)
+        self.assertNotIn("raise", criteria)
+
+    def test_prompt_legacy_si_ofrece_all_in(self):
+        from src.game import get_prompt
+
+        bot = LayaBot(FakeAgent(), prompt=get_prompt("legacy_all_in"))
+
+        criteria = bot.build_questions(self.game)["action"]["criteria"]
+
+        self.assertIn("all_in", criteria)
 
     def test_acepta_respuestas_sin_envolver(self):
         agent = FakeAgent({"action": {"choice": "call", "answer_confidence": 0.9}})
@@ -222,13 +298,13 @@ class LayaBotsFactoryTests(unittest.TestCase):
 
         game = new_game(count=4)
         agent = FakeAgent()
-        prompts = [get_prompt("tight"), get_prompt("aggressive")]
+        prompts = [get_prompt("tight"), get_prompt("solid")]
 
         bots = create_laya_bots(game, agent, prompts=prompts)
 
         self.assertEqual(
             [b.prompt.name for b in bots],
-            ["tight", "aggressive", "tight", "aggressive"],
+            ["tight", "solid", "tight", "solid"],
         )
 
 

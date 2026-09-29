@@ -1,4 +1,19 @@
-"""Motor de Texas Hold'em No-Limit.
+"""Motor de Texas Hold'em No-Limit con las reglas oficiales.
+
+Reglas implementadas:
+  * Ciegas (pequeña y grande) y botón que rota cada mano; en heads-up el botón
+    postea la ciega pequeña y actúa primero preflop, pero postflop lo hace la
+    ciega grande.
+  * Reparto de dos cartas por jugador en dos rondas, empezando a la izquierda
+    del botón.
+  * Una carta quemada (burn) antes del flop, del turn y del river.
+  * Rondas de apuestas preflop, flop, turn y river; el postflop abre el juego
+    el jugador a la izquierda del botón.
+  * Apuesta mínima postflop = ciega grande; subida mínima = última subida
+    completa.
+  * All-in (incluido el all-in corto, que no reabre la apuesta a quien ya
+    actuó; varios all-ins cortos que sumen una subida completa sí la reabren).
+  * Botes laterales (side pots) y reparto del bote con empates.
 
 Flujo de una mano:
 
@@ -62,6 +77,10 @@ class Game:
         self.pot = 0
         self.current_bet = 0
         self.min_raise = big_blind
+        # Apuesta en la última subida completa y tamaño de esa subida, para
+        # calcular el mínimo de re-subida y si los all-ins cortos reabren.
+        self.last_full_bet = big_blind
+        self.last_full_raise = big_blind
         self.to_act: list[int] = []
         self.hand_number = 0
 
@@ -80,6 +99,8 @@ class Game:
         self.pot = 0
         self.current_bet = 0
         self.min_raise = self.big_blind
+        self.last_full_bet = self.big_blind
+        self.last_full_raise = self.big_blind
 
         for player in self.players:
             player.resetForHand()
@@ -94,9 +115,14 @@ class Game:
             self.state = GameState.FINISHED
             return
 
-        # Reparte dos cartas a cada jugador en la mano.
+        # Reparte dos cartas a cada jugador, una ronda de una carta a la vez
+        # empezando por el jugador a la izquierda del botón (que aún es el de
+        # la mano anterior; el botón se mueve después, pero el efecto es el
+        # mismo: se reparte en el sentido de las agujas del reloj).
+        reparto = self._order_from(self._next_seat(self.button, lambda i: True))
+        reparto = [i for i in reparto if self.players[i].isActive()]
         for _ in range(2):
-            for i in ocupados:
+            for i in reparto:
                 self.players[i].getHand().append(self.deck.draw())
 
         # Mueve el botón al siguiente jugador con fichas.
@@ -170,18 +196,28 @@ class Game:
             # Subir menos del mínimo solo es legal cuando es un all-in; en ese
             # caso no reabre la apuesta a quien ya actuó en esta calle.
             reopen = raise_size >= self.min_raise
-            self.min_raise = max(self.min_raise, raise_size)
+            if reopen:
+                self.last_full_bet = amount
+                self.last_full_raise = raise_size
+                self.min_raise = raise_size
+            else:
+                self.min_raise = self.last_full_raise
 
         elif action == Action.ALL_IN:
             add = player.getChips()
             self._commit(player, add)
             if player.getCurrentBet() > self.current_bet:
-                raise_size = player.getCurrentBet() - self.current_bet
-                # Un all-in que supera la apuesta reabre la acción a quien ya
-                # actuó; si sube menos del mínimo, solo se les permite
-                # igualar o retirarse (regla del all-in corto).
-                reopen = raise_size >= self.min_raise
-                self.min_raise = max(self.min_raise, raise_size)
+                # Los all-ins cortos reabren si, entre todos, superan la apuesta
+                # anterior en al menos el tamaño de la última subida completa.
+                reopen = (
+                    player.getCurrentBet() - self.last_full_bet >= self.last_full_raise
+                )
+                if reopen:
+                    self.last_full_raise = player.getCurrentBet() - self.last_full_bet
+                    self.last_full_bet = player.getCurrentBet()
+                    self.min_raise = self.last_full_raise
+                else:
+                    self.min_raise = self.last_full_raise
                 self.current_bet = player.getCurrentBet()
                 aggressive = True
 
@@ -204,17 +240,31 @@ class Game:
             # responder, en orden a partir del asiento siguiente al que subió.
             if reopen:
                 first = self._next_seat(idx, self._can_act)
+                self.to_act = [i for i in self._order_from(first) if i != idx]
             else:
-                # All-in corto: solo responden los que tienen una apuesta
-                # pendiente y todavía no la habían igualado.
-                first = self._next_seat(
-                    idx,
-                    lambda i: (
-                        self._can_act(i)
-                        and self.players[i].getCurrentBet() < self.current_bet
-                    ),
-                )
-            self.to_act = [i for i in self._order_from(first) if i != idx]
+                # All-in corto: no reabre la apuesta. Solo deben responder los
+                # que aún no habían igualado la apuesta actual y no han
+                # actuado todavía en esta calle; quien ya actuó solo puede
+                # igualar o retirarse, así que se le deja en la cola solo si
+                # le falta por poner.
+                pendientes = [
+                    i
+                    for i in range(self.seats)
+                    if i != idx
+                    and self._can_act(i)
+                    and self.players[i].getCurrentBet() < self.current_bet
+                    and i in self.to_act
+                ]
+                if pendientes:
+                    first = self._next_seat(
+                        idx,
+                        lambda i: i in pendientes,
+                    )
+                    self.to_act = [
+                        i for i in self._order_from(first) if i in pendientes
+                    ]
+                else:
+                    self.to_act = []
 
         if not self.to_act:
             self._finish_betting()
@@ -228,12 +278,15 @@ class Game:
 
     def _advance_street(self):
         if self.state == GameState.PREFLOP:
+            self._burn()
             self._deal_community(3)
             self.state = GameState.FLOP
         elif self.state == GameState.FLOP:
+            self._burn()
             self._deal_community(1)
             self.state = GameState.TURN
         elif self.state == GameState.TURN:
+            self._burn()
             self._deal_community(1)
             self.state = GameState.RIVER
         elif self.state == GameState.RIVER:
@@ -243,10 +296,12 @@ class Game:
             return
 
         self.current_bet = 0
+        # La apuesta mínima postflop es la ciega grande.
         self.min_raise = self.big_blind
+        self.last_full_bet = self.big_blind
+        self.last_full_raise = self.big_blind
         for player in self.players:
             player.setCurrentBet(0)
-
         first = self._next_seat(self.button, self._can_act)
         self.to_act = self._open_betting(first)
 
@@ -256,6 +311,11 @@ class Game:
         if len(pueden) < 2:
             return []
         return self._order_from(first)
+
+    def _burn(self):
+        """Quema una carta antes de repartir las comunitarias (regla oficial)."""
+        if len(self.deck) > 0:
+            self.deck.draw()
 
     def _deal_community(self, count):
         self.community.extend(self.deck.draw_many(count))
@@ -338,6 +398,8 @@ class Game:
             self.players[self.big_blind_seat].getCurrentBet(),
         )
         self.min_raise = self.big_blind
+        self.last_full_bet = self.big_blind
+        self.last_full_raise = self.big_blind
 
     def __repr__(self):
         return f"Game({self.seats} jugadores, {self.state.name})"

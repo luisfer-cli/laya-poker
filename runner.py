@@ -178,7 +178,18 @@ def resolve_prompts(spec, players):
     nombres = [n.strip() for n in spec.split(",") if n.strip()]
     if not nombres:
         nombres = ["default"]
-    prompts = [get_prompt(n) for n in nombres]
+
+    prompts = []
+    for nombre in nombres:
+        try:
+            prompts.append(get_prompt(nombre))
+        except ValueError:
+            disponibles = ", ".join(PROMPTS)
+            raise SystemExit(
+                f"Error: prompt desconocido {nombre!r}.\n"
+                f"Disponibles: {disponibles}\n"
+                f"Usa --list-prompts para ver la descripción de cada uno."
+            ) from None
     return [prompts[i % len(prompts)] for i in range(players)]
 
 

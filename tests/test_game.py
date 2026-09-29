@@ -12,11 +12,63 @@ def jugadores(ficheros):
 
 
 def stack_deck(game, orden):
-    """Prepara el mazo para que las cartas salgan en ``orden`` (pop desde el final)."""
-    game.deck.cards = list(reversed(orden))
+    """Prepara el mazo para que las cartas salgan en ``orden`` (pop desde el final).
+
+    ``orden`` es la lista de cartas en el orden en que se consumen, **sin** las
+    cartas quemadas: las 2*n cartas de las manos (ya en orden de reparto), el
+    flop (3), el turn (1) y el river (1). Esta función inserta automáticamente
+    las burn cards reglamentarias antes de cada calle.
+    """
+    num_jugadores = len([p for p in game.players if p.getChips() > 0])
+    manos = list(orden[: 2 * num_jugadores])
+    board = list(orden[2 * num_jugadores :])
+
+    consumido = list(manos)
+    if board:
+        consumido.append(Card("2", "♣️"))  # burn del flop
+        consumido.extend(board[:3])
+    if len(board) > 3:
+        consumido.append(Card("3", "♣️"))  # burn del turn
+        consumido.append(board[3])
+    if len(board) > 4:
+        consumido.append(Card("4", "♣️"))  # burn del river
+        consumido.append(board[4])
+
+    game.deck.cards = list(reversed(consumido))
 
 
 class GameSetupTests(unittest.TestCase):
+    def test_quema_una_carta_por_calle(self):
+        game = Game(jugadores([1000, 1000]), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+
+        # 52 - 4 (manos) = 48 en el mazo tras repartir.
+        self.assertEqual(len(game.deck), 48)
+
+        game.act(Action.CALL)
+        game.act(Action.CHECK)
+        # Flop: 1 burn + 3 cartas = 44.
+        self.assertEqual(game.state, GameState.FLOP)
+        self.assertEqual(len(game.deck), 44)
+
+        game.act(Action.CHECK)
+        game.act(Action.CHECK)
+        # Turn: 1 burn + 1 carta = 42.
+        self.assertEqual(game.state, GameState.TURN)
+        self.assertEqual(len(game.deck), 42)
+
+        game.act(Action.CHECK)
+        game.act(Action.CHECK)
+        # River: 1 burn + 1 carta = 40.
+        self.assertEqual(game.state, GameState.RIVER)
+        self.assertEqual(len(game.deck), 40)
+
+    def test_mazo_suficiente_en_mesa_llena(self):
+        # 10 jugadores: 20 cartas + 3 burns + 5 comunitarias = 28 <= 52.
+        game = Game(jugadores([1000] * 10), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+        self.assertEqual(len(game.deck), 52 - 20)
+
     def test_reparte_dos_cartas_y_cobra_ciegas(self):
         game = Game(jugadores([1000, 1000, 1000]), small_blind=5, big_blind=10)
         game.start(shuffle=False)
@@ -119,7 +171,7 @@ class GameFlowTests(unittest.TestCase):
         game = Game(jugadores([1000, 1000, 1000]), small_blind=5, big_blind=10)
         game.start(shuffle=False)
 
-        # P0 es la ciega pequeña: con 105 fichas, "subir a 100" es su all-in.
+        # P0 es la ciega pequeña: con 100 fichas, "subir a 100" es su all-in.
         game.players[0].setChips(100)
         game.act(Action.RAISE, 100)
         self.assertTrue(game.players[0].isAllIn())
@@ -134,6 +186,32 @@ class GameFlowTests(unittest.TestCase):
         # P2 (ciega grande) debe responder; P0 ya está all-in, así que no actúa,
         # pero el all-in corto tampoco reabre la subida a nadie más.
         self.assertEqual([game.players[i].getName() for i in game.to_act], ["P2"])
+
+    def test_all_in_corto_no_deja_resubir_a_quien_ya_actuo(self):
+        game = Game(jugadores([1000, 1000, 1000, 1000]), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+
+        # P3 (UTG) sube a 100 y P0 responde all-in corto (135).
+        game.act(Action.RAISE, 100)
+        game.players[0].setChips(135)
+        game.act(Action.ALL_IN)
+
+        # P3 ya había actuado: no vuelve a la cola porque el all-in corto no
+        # reabre la apuesta. Solo responden P1 y P2, que no habían igualado.
+        nombres = [game.players[i].getName() for i in game.to_act]
+        self.assertNotIn("P3", nombres)
+        self.assertEqual(nombres, ["P1", "P2"])
+
+    def test_subida_minima_postflop_es_la_ciega_grande(self):
+        game = Game(jugadores([1000, 1000]), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+        game.act(Action.CALL)
+        game.act(Action.CHECK)
+        self.assertEqual(game.state, GameState.FLOP)
+
+        with self.assertRaises(ValueError):
+            game.act(Action.BET, 5)  # por debajo de la ciega grande
+        game.act(Action.BET, 10)  # mínimo legal
 
     def test_jugador_que_aporta_menos_de_una_ciega_queda_all_in(self):
         # P0 es el botón, P1 la ciega pequeña con solo 3 fichas y P2 la grande.
