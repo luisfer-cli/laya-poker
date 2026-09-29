@@ -1,4 +1,7 @@
-import Card
+try:  # importado como paquete: src.game.player
+    from .card import Card
+except ImportError:  # importado plano (el directorio src/game en el path)
+    from card import Card
 
 
 class Player:
@@ -7,6 +10,7 @@ class Player:
         self.chips = chips
         self.hand: list[Card] = []
         self.currentBet = 0
+        self.contributed = 0
         self.folded = False
         self.allIn = False
 
@@ -45,3 +49,21 @@ class Player:
 
     def setAllIn(self, value):
         self.allIn = value
+
+    def isActive(self):
+        """Sigue en la mano (no se ha retirado)."""
+        return not self.folded
+
+    def canAct(self):
+        """Puede tomar una decisión (en la mano y con fichas)."""
+        return not self.folded and not self.allIn
+
+    def resetForHand(self):
+        self.hand = []
+        self.currentBet = 0
+        self.contributed = 0
+        self.folded = False
+        self.allIn = False
+
+    def __repr__(self):
+        return f"Player({self.name}, {self.chips})"
