@@ -74,6 +74,18 @@ class BotEngineTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             BotEngine(game, [FunctionBot(lambda g: Decision(Action.FOLD))])
 
+    def test_play_current_hand(self):
+        game = new_game()
+        bots = [FunctionBot(lambda g: (Action.CALL, 0)) for _ in game.players]
+        engine = BotEngine(game, bots)
+
+        game.start_hand()
+        self.assertEqual(game.state, GameState.PREFLOP)
+        engine.play_current_hand()
+
+        self.assertEqual(game.state, GameState.FINISHED)
+        self.assertEqual(sum(p.getChips() for p in game.players), 3000)
+
     def test_play_hands(self):
         game = new_game()
         bots = [FunctionBot(lambda g: (Action.CALL, 0)) for _ in game.players]

@@ -33,7 +33,7 @@ class LayaBotStateTests(unittest.TestCase):
         self.assertEqual(context["to_call"], 10)  # el botón debe igualar 10
         self.assertEqual(context["board"], [])
         self.assertEqual(len(context["hero"]["hole_cards"]), 2)
-        self.assertEqual(context["hero"]["position"], "button")
+        self.assertEqual(context["hero"]["position"], "BTN")
         self.assertEqual(len(context["players"]), 3)
         self.assertEqual(sum(1 for p in context["players"] if p["is_hero"]), 1)
 
@@ -49,6 +49,46 @@ class LayaBotStateTests(unittest.TestCase):
         self.assertIn("Hero", state)
         self.assertIn("Pot: 15 chips", state)
         self.assertIn("Opponents", state)
+
+    def test_estado_incluye_posicion_y_contexto(self):
+        game = new_game(count=6)
+        game.start(shuffle=False)
+        bot = LayaBot(FakeAgent())
+
+        context = bot.build_context(game)
+
+        # En la primera mano el botón es el asiento 0; el primero en hablar
+        # preflop es el UTG (asiento 5).
+        self.assertEqual(game.button, 0)
+        boton = next(p for p in context["players"] if p["seat"] == game.button)
+        self.assertEqual(boton["position"], "BTN")
+        self.assertEqual(context["hero"]["position"], "CO")
+        posiciones = {p["position"] for p in context["players"]}
+        self.assertIn("UTG", posiciones)
+        self.assertIn("SB", posiciones)
+        self.assertIn("BB", posiciones)
+        self.assertEqual(context["num_active"], 6)
+        self.assertTrue(context["can_raise"])
+        self.assertTrue(context["can_reraise"])  # debe igualar la ciega
+
+        state = bot.build_state(game)
+        self.assertIn("effective stack", state)
+        self.assertIn("can re-raise", state)
+
+    def test_stack_efectivo_usa_el_rival_mas_corto(self):
+        game = Game(
+            [Player("Ana", 1000), Player("Beto", 405), Player("Caro", 1000)],
+            small_blind=5,
+            big_blind=10,
+        )
+        game.start(shuffle=False)
+        bot = LayaBot(FakeAgent())
+
+        context = bot.build_context(game)
+
+        # Beto (ciega pequeña) postea 5, así que le quedan 400.
+        self.assertEqual(game.players[1].getChips(), 400)
+        self.assertEqual(context["effective_stack"], 400)
 
     def test_preguntas_solo_ofrecen_acciones_legales(self):
         game = new_game(count=3)
@@ -176,6 +216,67 @@ class LayaBotsFactoryTests(unittest.TestCase):
         self.assertEqual(len(bots), 4)
         self.assertTrue(all(isinstance(b, LayaBot) for b in bots))
         self.assertEqual([b.name for b in bots], ["P0", "P1", "P2", "P3"])
+
+    def test_asigna_prompts_ciclicamente(self):
+        from src.game import get_prompt
+
+        game = new_game(count=4)
+        agent = FakeAgent()
+        prompts = [get_prompt("tight"), get_prompt("aggressive")]
+
+        bots = create_laya_bots(game, agent, prompts=prompts)
+
+        self.assertEqual(
+            [b.prompt.name for b in bots],
+            ["tight", "aggressive", "tight", "aggressive"],
+        )
+
+
+class PromptTests(unittest.TestCase):
+    def setUp(self):
+        self.game = new_game(count=3)
+        self.game.start(shuffle=False)
+
+    def test_prompt_personaliza_las_descripciones(self):
+        from src.game import Prompt
+
+        prompt = Prompt(
+            name="custom",
+            action_text={
+                "fold": "TIRAR",
+                "check": "PASAR",
+                "call": "IGUALAR",
+                "bet": "APOSTAR",
+                "raise": "SUBIR",
+                "all_in": "TODO",
+            },
+        )
+        bot = LayaBot(FakeAgent(), prompt=prompt)
+
+        criteria = bot.build_questions(self.game)["action"]["criteria"]
+
+        self.assertEqual(criteria["fold"], "TIRAR")
+        self.assertEqual(criteria["call"], "IGUALAR")
+
+    def test_prompt_persona_aparece_en_el_estado(self):
+        from src.game import Prompt
+
+        prompt = Prompt(name="con-persona", persona="Eres un jugador muy tacaño.")
+        bot = LayaBot(FakeAgent(), prompt=prompt)
+
+        state = bot.build_state(self.game)
+
+        self.assertTrue(state.startswith("Eres un jugador muy tacaño."))
+
+    def test_prompt_json_devuelve_dict(self):
+        from src.game import get_prompt
+
+        bot = LayaBot(FakeAgent(), prompt=get_prompt("json"))
+
+        state = bot.build_state(self.game)
+
+        self.assertIsInstance(state, dict)
+        self.assertEqual(state["street"], "preflop")
 
 
 if __name__ == "__main__":

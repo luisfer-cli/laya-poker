@@ -132,9 +132,10 @@ class Game:
 
         idx = self.to_act[0]
         player = self.players[idx]
-        to_call = self.current_bet - player.getCurrentBet()
+        to_call = max(0, self.current_bet - player.getCurrentBet())
 
         aggressive = False
+        reopen = True
 
         if action == Action.FOLD:
             player.setFolded(True)
@@ -164,15 +165,22 @@ class Game:
             if add > player.getChips():
                 raise ValueError("No tienes fichas suficientes, usa ALL_IN")
             self._commit(player, add)
-            self.min_raise = raise_size
             self.current_bet = amount
             aggressive = True
+            # Subir menos del mínimo solo es legal cuando es un all-in; en ese
+            # caso no reabre la apuesta a quien ya actuó en esta calle.
+            reopen = raise_size >= self.min_raise
+            self.min_raise = max(self.min_raise, raise_size)
 
         elif action == Action.ALL_IN:
             add = player.getChips()
             self._commit(player, add)
             if player.getCurrentBet() > self.current_bet:
                 raise_size = player.getCurrentBet() - self.current_bet
+                # Un all-in que supera la apuesta reabre la acción a quien ya
+                # actuó; si sube menos del mínimo, solo se les permite
+                # igualar o retirarse (regla del all-in corto).
+                reopen = raise_size >= self.min_raise
                 self.min_raise = max(self.min_raise, raise_size)
                 self.current_bet = player.getCurrentBet()
                 aggressive = True
@@ -180,9 +188,9 @@ class Game:
         else:
             raise ValueError(f"Acción desconocida: {action}")
 
-        self._register_action(idx, player, aggressive)
+        self._register_action(idx, player, aggressive, reopen)
 
-    def _register_action(self, idx, player, aggressive):
+    def _register_action(self, idx, player, aggressive, reopen=True):
         if idx in self.to_act:
             self.to_act.remove(idx)
 
@@ -192,9 +200,20 @@ class Game:
             return
 
         if aggressive:
-            # Tras una subida, todos los que aún pueden actuar deben responder,
-            # en orden a partir del asiento siguiente al que subió.
-            first = self._next_seat(idx, self._can_act)
+            # Tras una subida que reabre, todos los que aún pueden actuar deben
+            # responder, en orden a partir del asiento siguiente al que subió.
+            if reopen:
+                first = self._next_seat(idx, self._can_act)
+            else:
+                # All-in corto: solo responden los que tienen una apuesta
+                # pendiente y todavía no la habían igualado.
+                first = self._next_seat(
+                    idx,
+                    lambda i: (
+                        self._can_act(i)
+                        and self.players[i].getCurrentBet() < self.current_bet
+                    ),
+                )
             self.to_act = [i for i in self._order_from(first) if i != idx]
 
         if not self.to_act:
@@ -276,6 +295,7 @@ class Game:
         player.setCurrentBet(player.getCurrentBet() + amount)
         player.contributed += amount
         self.pot += amount
+        # Si pagó todo lo que le quedaba, ya no puede actuar en esta mano.
         if player.getChips() == 0:
             player.setAllIn(True)
         return amount

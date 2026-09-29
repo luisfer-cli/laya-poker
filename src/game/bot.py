@@ -72,8 +72,12 @@ class BotEngine:
         self.history: list = []
 
     def play_hand(self):
+        self.game.start_hand()
+        return self.play_current_hand()
+
+    def play_current_hand(self):
+        """Juega una mano ya repartida (no llama a ``start_hand``)."""
         game = self.game
-        game.start_hand()
         steps = 0
 
         while game.state != GameState.FINISHED:

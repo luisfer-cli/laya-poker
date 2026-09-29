@@ -98,6 +98,56 @@ class GameFlowTests(unittest.TestCase):
         game.act(Action.CHECK)
         self.assertEqual(game.state, GameState.FINISHED)
 
+    def test_all_in_reabre_la_accion_a_quien_ya_actuo(self):
+        game = Game(jugadores([1000, 1000, 1000, 1000]), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+
+        # Preflop actúan P3, P0, P1 y luego P2.
+        game.act(Action.CALL)  # P3
+        game.act(Action.CALL)  # P0
+        game.act(Action.CALL)  # P1
+        self.assertEqual([game.players[i].getName() for i in game.to_act], ["P2"])
+
+        game.act(Action.ALL_IN)  # P2, el último
+
+        # Los tres que ya habían igualado deben volver a responder.
+        self.assertEqual(
+            [game.players[i].getName() for i in game.to_act], ["P3", "P0", "P1"]
+        )
+
+    def test_all_in_corto_no_reabre_la_accion(self):
+        game = Game(jugadores([1000, 1000, 1000]), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+
+        # P0 es la ciega pequeña: con 105 fichas, "subir a 100" es su all-in.
+        game.players[0].setChips(100)
+        game.act(Action.RAISE, 100)
+        self.assertTrue(game.players[0].isAllIn())
+        self.assertEqual(game.current_bet, 100)
+        self.assertEqual([game.players[i].getName() for i in game.to_act], ["P1", "P2"])
+
+        # P1 (aún sin actuar) va all-in corto: 155, sube 55 < 100.
+        game.players[1].setChips(150)
+        game.act(Action.ALL_IN)
+        self.assertEqual(game.current_bet, 155)
+
+        # P2 (ciega grande) debe responder; P0 ya está all-in, así que no actúa,
+        # pero el all-in corto tampoco reabre la subida a nadie más.
+        self.assertEqual([game.players[i].getName() for i in game.to_act], ["P2"])
+
+    def test_jugador_que_aporta_menos_de_una_ciega_queda_all_in(self):
+        # P0 es el botón, P1 la ciega pequeña con solo 3 fichas y P2 la grande.
+        game = Game(jugadores([1000, 3, 1000]), small_blind=5, big_blind=10)
+        game.start(shuffle=False)
+
+        corto = game.players[1]
+        self.assertTrue(corto.isAllIn())  # no llega ni a la ciega pequeña
+        self.assertEqual(corto.getChips(), 0)
+        self.assertEqual(corto.getCurrentBet(), 3)
+        self.assertEqual(game.pot, 3 + 10)
+        # Aun estando all-in, los demás siguen pudiendo actuar.
+        self.assertTrue(game.to_act)
+
 
 class ShowdownTests(unittest.TestCase):
     def test_showdown_reparte_el_bote_al_mejor(self):

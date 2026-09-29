@@ -24,6 +24,7 @@ def build_side_pots(players):
 
     pots = []
     previous = 0
+    pending = 0  # fichas de niveles a los que ya no opta nadie
     for level in levels:
         players_at_level = sum(1 for c in contributions.values() if c >= level)
         amount = (level - previous) * players_at_level
@@ -32,8 +33,17 @@ def build_side_pots(players):
             for player in players
             if contributions[player] >= level and player.isActive()
         ]
-        pots.append(SidePot(amount, eligible))
+        if eligible:
+            pots.append(SidePot(amount + pending, eligible))
+            pending = 0
+        else:
+            # Nadie que haya aportado este nivel sigue en la mano: esas fichas
+            # se suman al siguiente bote que sí se dispute.
+            pending += amount
         previous = level
+
+    if pending and pots:
+        pots[0].amount += pending
 
     return _merge(pots)
 

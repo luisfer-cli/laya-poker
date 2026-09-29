@@ -4,29 +4,22 @@
 ``agent`` con un método ``predict(state, questions)``. Para el modelo real,
 usa ``load_agent()``; para tests, basta con un doble que devuelva respuestas.
 
-El bot construye un ``state`` en lenguaje natural (el formato que mejor
-entiende Laya) y preguntas de tipo ``choice``: una para la acción y otra para
-el tamaño de la subida.
+El bot construye un ``state`` (texto natural o JSON según el ``Prompt``) y
+preguntas de tipo ``choice``: una para la acción y otra para el tamaño.
 """
 
 try:  # importado como paquete: src.game.laya_bot
     from .bot import Bot, Decision
     from .game import Action
+    from .positions import seat_position_names
+    from .prompts import Prompt
 except ImportError:  # importado plano (el directorio src/game en el path)
     from bot import Bot, Decision
+    from positions import seat_position_names
+    from prompts import Prompt
 
     from game import Action
 
-
-ACTION_INSTRUCTIONS = (
-    "You are playing No-Limit Texas Hold'em. Read the table state and choose "
-    "the best action for the hero. Consider pot odds, position and stack size."
-)
-
-SIZE_INSTRUCTIONS = (
-    "Choose how many chips the hero should end up with in front this street "
-    "when betting or raising."
-)
 
 _SUIT_NAMES = {"♠️": "spades", "♥️": "hearts", "♦️": "diamonds", "♣️": "clubs"}
 _RANK_NAMES = {"A": "Ace", "K": "King", "Q": "Queen", "J": "Jack", "10": "Ten"}
@@ -40,10 +33,17 @@ def card_text(card) -> str:
 
 
 class LayaBot(Bot):
-    def __init__(self, agent, name: str = "Laya", min_confidence: float = 0.0):
+    def __init__(
+        self,
+        agent,
+        name: str = "Laya",
+        min_confidence: float = 0.0,
+        prompt: Prompt | None = None,
+    ):
         super().__init__(name)
         self.agent = agent
         self.min_confidence = min_confidence
+        self.prompt = prompt or Prompt()
 
     # ------------------------------------------------------------- decisión
     def decide(self, game) -> Decision:
@@ -57,20 +57,36 @@ class LayaBot(Bot):
         """Datos estructurados de la situación (para depurar y testear)."""
         seat = game.currentSeat()
         player = game.players[seat]
-        to_call = game.current_bet - player.getCurrentBet()
+        to_call = max(0, game.current_bet - player.getCurrentBet())
+        positions = seat_position_names(game.seats, game.button, game.small_blind_seat)
+
+        activos = [p for p in game.players if p.isActive()]
+        rivales = [p for p in activos if p is not player]
+        # Stack efectivo: lo máximo que se puede poner en juego contra el rival
+        # más corto que siga en la mano.
+        stack_efectivo = min([player.getChips()] + [p.getChips() for p in rivales])
+        max_to = player.getChips() + player.getCurrentBet()
+        min_to = game.current_bet + game.min_raise
 
         return {
             "game": "No-Limit Texas Hold'em",
             "street": game.state.name.lower(),
             "hand_number": game.hand_number,
             "pot": game.pot,
+            "pot_bb": round(game.pot / game.big_blind, 1),
             "board": [card_text(card) for card in game.community],
             "to_call": to_call,
-            "min_raise_to": game.current_bet + game.min_raise,
+            "to_call_bb": round(to_call / game.big_blind, 2),
+            "min_raise_to": min_to,
+            "max_raise_to": max_to,
+            "can_raise": player.getChips() > 0 and max_to >= min_to,
+            "can_reraise": to_call > 0 and player.getChips() > to_call,
+            "effective_stack": stack_efectivo,
+            "num_active": len(activos),
             "hero": {
                 "seat": seat,
                 "name": player.getName(),
-                "position": self._position(game, seat),
+                "position": positions.get(seat, "middle position"),
                 "chips": player.getChips(),
                 "hole_cards": [card_text(card) for card in player.getHand()],
                 "current_bet": player.getCurrentBet(),
@@ -80,6 +96,7 @@ class LayaBot(Bot):
                 {
                     "seat": i,
                     "name": p.getName(),
+                    "position": positions.get(i, "?"),
                     "chips": p.getChips(),
                     "current_bet": p.getCurrentBet(),
                     "folded": p.isFolded(),
@@ -90,9 +107,16 @@ class LayaBot(Bot):
             ],
         }
 
-    def build_state(self, game) -> str:
-        """Situation en lenguaje natural, el formato que mejor entiende Laya."""
+    def build_state(self, game):
+        """Situación para el modelo, en texto natural o JSON según el prompt."""
         ctx = self.build_context(game)
+
+        if self.prompt.state_style == "json":
+            data = dict(ctx)
+            if self.prompt.persona:
+                data["persona"] = self.prompt.persona
+            return data
+
         hero = ctx["hero"]
         board = ", ".join(ctx["board"]) if ctx["board"] else "none"
 
@@ -102,26 +126,38 @@ class LayaBot(Bot):
                 continue
             status = "folded" if p["folded"] else "all-in" if p["all_in"] else "in hand"
             rivals.append(
-                f"{p['name']} ({status}, {p['chips']} chips, bet {p['current_bet']})"
+                f"{p['name']} ({p['position']}, {status}, {p['chips']} chips, "
+                f"bet {p['current_bet']})"
             )
 
-        return (
-            f"No-Limit Texas Hold'em, {ctx['street']}. "
+        limites = []
+        if ctx["can_raise"]:
+            limites.append(f"smallest legal raise is to {ctx['min_raise_to']}")
+        if ctx["can_reraise"]:
+            limites.append("hero can re-raise")
+        limites_txt = (" Hero options: " + ", ".join(limites) + ".") if limites else ""
+
+        state = (
+            f"No-Limit Texas Hold'em, {ctx['street']}, {ctx['num_active']} players in the hand. "
             f"Hero is {hero['name']} on the {hero['position']} with "
             f"{', '.join(hero['hole_cards'])}. "
             f"Board: {board}. "
-            f"Pot: {ctx['pot']} chips. Hero must call {ctx['to_call']} chips "
-            f"(minimum raise to {ctx['min_raise_to']}). "
-            f"Hero stack: {hero['chips']} chips. "
+            f"Pot: {ctx['pot']} chips ({ctx['pot_bb']} big blinds). "
+            f"Hero must call {ctx['to_call']} chips to stay in the hand. "
+            f"Hero stack: {hero['chips']} chips, effective stack vs shortest rival: "
+            f"{ctx['effective_stack']} chips.{limites_txt} "
             f"Opponents: {'; '.join(rivals)}."
         )
+        if self.prompt.persona:
+            state = f"{self.prompt.persona} {state}"
+        return state
 
     def build_questions(self, game) -> dict:
         legal = self._legal_actions(game)
         questions = {
             "action": {
                 "type": "choice",
-                "instructions": ACTION_INSTRUCTIONS,
+                "instructions": self.prompt.action_instructions,
                 "criteria": {key: desc for key, (_, desc) in legal.items()},
             }
         }
@@ -130,7 +166,7 @@ class LayaBot(Bot):
         if sizes:
             questions["bet_size"] = {
                 "type": "choice",
-                "instructions": SIZE_INSTRUCTIONS,
+                "instructions": self.prompt.size_instructions,
                 "criteria": {key: desc for key, (_, desc) in sizes.items()},
             }
         return questions
@@ -185,36 +221,42 @@ class LayaBot(Bot):
         """dict: clave -> (Action, descripción) con las acciones legales."""
         seat = game.currentSeat()
         player = game.players[seat]
-        to_call = game.current_bet - player.getCurrentBet()
+        to_call = max(0, game.current_bet - player.getCurrentBet())
         max_to = player.getChips() + player.getCurrentBet()
         min_to = game.current_bet + game.min_raise
+        values = {"to_call": to_call, "min_to": min_to, "chips": player.getChips()}
 
-        options = {"fold": (Action.FOLD, "Fold and give up the hand.")}
+        options = {
+            "fold": (Action.FOLD, self.prompt.action_description("fold", **values))
+        }
 
         if to_call == 0:
             options["check"] = (
                 Action.CHECK,
-                "Check, passing the action without betting.",
+                self.prompt.action_description("check", **values),
             )
         else:
             options["call"] = (
                 Action.CALL,
-                f"Call {to_call} chips to stay in the hand.",
+                self.prompt.action_description("call", **values),
             )
 
         if player.getChips() > 0 and max_to >= min_to:
             if game.current_bet == 0:
                 options["bet"] = (
                     Action.BET,
-                    f"Open the betting for at least {min_to} chips.",
+                    self.prompt.action_description("bet", **values),
                 )
             else:
-                options["raise"] = (Action.RAISE, f"Raise to at least {min_to} chips.")
+                options["raise"] = (
+                    Action.RAISE,
+                    self.prompt.action_description("raise", **values),
+                )
 
         if player.getChips() > 0:
             options["all_in"] = (
                 Action.ALL_IN,
-                f"Go all-in for {player.getChips()} chips.",
+                self.prompt.action_description("all_in", **values),
             )
 
         return options
@@ -223,7 +265,7 @@ class LayaBot(Bot):
         """dict: clave -> (importe, descripción) con tamaños de subida legales."""
         seat = game.currentSeat()
         player = game.players[seat]
-        to_call = game.current_bet - player.getCurrentBet()
+        to_call = max(0, game.current_bet - player.getCurrentBet())
         max_to = player.getChips() + player.getCurrentBet()
         min_to = game.current_bet + game.min_raise
 
@@ -246,25 +288,16 @@ class LayaBot(Bot):
             if amount in seen:
                 continue
             seen.add(amount)
-            sizes[key] = (amount, f"Make it {amount} chips.")
+            sizes[key] = (amount, self.prompt.size_description(key, amount=amount))
         return sizes
 
     def _fallback(self, game) -> Decision:
         seat = game.currentSeat()
         player = game.players[seat]
-        to_call = game.current_bet - player.getCurrentBet()
+        to_call = max(0, game.current_bet - player.getCurrentBet())
         if to_call == 0:
             return Decision(Action.CHECK)
         return Decision(Action.FOLD)
-
-    def _position(self, game, seat) -> str:
-        if seat == game.button:
-            return "button"
-        if seat == game.small_blind_seat:
-            return "small blind"
-        if seat == game.big_blind_seat:
-            return "big blind"
-        return "middle position"
 
 
 def load_agent(model: str = "convaiinnovations/laya", **kwargs):
@@ -278,6 +311,19 @@ def load_agent(model: str = "convaiinnovations/laya", **kwargs):
     return laya.load(model, **kwargs)
 
 
-def create_laya_bots(game, agent, **kwargs):
-    """Un ``LayaBot`` por asiento, usando el mismo agente."""
-    return [LayaBot(agent, name=player.getName(), **kwargs) for player in game.players]
+def create_laya_bots(game, agent, prompts=None, **kwargs):
+    """Un ``LayaBot`` por asiento.
+
+    ``prompts`` puede ser un ``Prompt`` o una lista; si es una lista se asigna
+    cíclicamente a los asientos, para comparar prompts en la misma mesa.
+    """
+    if prompts is None:
+        prompts = [Prompt()]
+    elif isinstance(prompts, Prompt):
+        prompts = [prompts]
+
+    bots = []
+    for i, player in enumerate(game.players):
+        prompt = prompts[i % len(prompts)]
+        bots.append(LayaBot(agent, name=player.getName(), prompt=prompt, **kwargs))
+    return bots
