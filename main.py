@@ -1,179 +1,170 @@
-"""Punto de entrada para probar el reparto de cartas.
-
-Uso:
-    python main.py                    # un reparto de ejemplo + validaciones
-    python main.py --repartos 5000    # además, comprueba aleatoriedad
-
-El programa construye una partida, reparte las cartas y verifica que:
-  * cada jugador recibe exactamente 2 cartas,
-  * no hay cartas repetidas entre las manos,
-  * al mazo le quedan 52 - 2 * jugadores cartas,
-  * (opcional) en muchos repartos salen las 52 cartas y el mazo está barajado.
-"""
+"""CLI para jugar Texas Hold'em contra bots de Laya."""
 
 import argparse
-from collections import Counter
+import random
 
-from src.game import Game, Player
+from src.game import (
+    Action,
+    Bot,
+    BotEngine,
+    Decision,
+    Game,
+    LayaBot,
+    Player,
+    get_prompt,
+    load_agent,
+)
+from src.game.prompts import PROMPTS
 
-
-def carta_a_texto(card):
-    return f"{card.getRank()}{card.getSuit()}"
-
-
-def validar_partida(partida, num_jugadores):
-    """Devuelve la lista de errores encontrados en un reparto."""
-    errores = []
-
-    todas = []
-    for i, jugador in enumerate(partida.players, start=1):
-        mano = jugador.getHand()
-        if len(mano) != 2:
-            errores.append(f"El jugador {i} tiene {len(mano)} cartas (se esperaban 2)")
-        todas.extend(mano)
-
-    if len(todas) != 2 * num_jugadores:
-        errores.append(f"Se repartieron {len(todas)} cartas en total")
-
-    repetidas = [
-        f"{rank}{suit}"
-        for (rank, suit), veces in Counter(
-            (c.getRank(), c.getSuit()) for c in todas
-        ).items()
-        if veces > 1
-    ]
-    if repetidas:
-        errores.append(f"Hay cartas repetidas: {', '.join(repetidas)}")
-
-    restantes = len(partida.deck.cards)
-    esperadas = 52 - 2 * num_jugadores
-    if restantes != esperadas:
-        errores.append(
-            f"Quedan {restantes} cartas en el mazo (se esperaban {esperadas})"
-        )
-
-    return errores
+NAMES = [
+    "Tú",
+    "Laya-1",
+    "Laya-2",
+    "Laya-3",
+    "Laya-4",
+    "Laya-5",
+    "Laya-6",
+    "Laya-7",
+]
+SUITS = {"♠️": "s", "♥️": "h", "♦️": "d", "♣️": "c"}
+RANKS = {"10": "T"}
 
 
-def repartir_de_ejemplo(num_jugadores):
-    """Hace un reparto y lo muestra por pantalla. Devuelve los errores."""
-    jugadores = [Player(f"Jugador {i + 1}", 1000) for i in range(num_jugadores)]
-    partida = Game(jugadores)
-    partida.start()
-
-    print("=" * 46)
-    print(f"Reparto de ejemplo ({num_jugadores} jugadores)")
-    print("=" * 46)
-    print(f"Estado: {partida.state.name} | Asientos: {partida.seats}")
-    for i, jugador in enumerate(partida.players, start=1):
-        mano = "  ".join(carta_a_texto(c) for c in jugador.getHand())
-        print(f"  {jugador.getName():<12} {mano}")
-    print(f"\nCartas restantes en el mazo: {len(partida.deck.cards)}")
-
-    errores = validar_partida(partida, num_jugadores)
-    if errores:
-        print("\n[FALLO] Se encontraron problemas en el reparto:")
-        for error in errores:
-            print(f"  - {error}")
-    else:
-        print("\n[OK] El reparto es correcto (2 cartas por jugador, sin repetidas).")
-
-    return errores
+def card(card):
+    rank = RANKS.get(card.getRank(), card.getRank())
+    suit = SUITS.get(card.getSuit(), card.getSuit())
+    return f"{rank}{suit}"
 
 
-def probar_aleatoriedad(num_jugadores, repartos):
-    """Repite muchos repartos y resume frecuencias y fallos."""
-    print("\n" + "=" * 46)
-    print(f"Comprobando {repartos} repartos...")
-    print("=" * 46)
+def cards(cards_):
+    return " ".join(card(c) for c in cards_) or "-"
 
-    frecuencias = Counter()
-    total_errores = 0
 
-    for _ in range(repartos):
-        jugadores = [Player(f"Jugador {i + 1}", 1000) for i in range(num_jugadores)]
-        partida = Game(jugadores)
-        partida.start()
+class HumanBot(Bot):
+    def decide(self, game):
+        player = game.currentPlayer()
+        print_table(game)
+        print(f"Tus cartas: {cards(player.getHand())}")
+        print("Acciones: fold/f, check/x, call/c, bet/b N, raise/r N, allin/a")
+        while True:
+            try:
+                text = input("> ").strip().lower().replace("-", "_")
+            except EOFError:
+                text = "fold"
+            decision = parse_human_action(text, game)
+            if decision:
+                return decision
+            print("Acción inválida.")
 
-        if validar_partida(partida, num_jugadores):
-            total_errores += 1
 
-        for jugador in partida.players:
-            for card in jugador.getHand():
-                frecuencias[carta_a_texto(card)] += 1
+def parse_human_action(text, game):
+    player = game.currentPlayer()
+    to_call = max(0, game.current_bet - player.getCurrentBet())
+    parts = text.split()
+    cmd = parts[0] if parts else ""
 
-    print(f"Repartos con errores: {total_errores}/{repartos}")
-    print(f"Cartas distintas repartidas: {len(frecuencias)}/52")
+    if cmd in ("f", "fold"):
+        return Decision(Action.FOLD)
+    if cmd in ("x", "check") and to_call == 0:
+        return Decision(Action.CHECK)
+    if cmd in ("c", "call") and to_call > 0:
+        return Decision(Action.CALL)
+    if cmd in ("a", "allin", "all_in", "all-in") and player.getChips() > 0:
+        return Decision(Action.ALL_IN)
+    if cmd in ("b", "bet", "r", "raise") and len(parts) == 2:
+        try:
+            amount = int(parts[1])
+        except ValueError:
+            return None
+        action = Action.BET if game.current_bet == 0 else Action.RAISE
+        if amount > game.current_bet and amount <= player.getChips() + player.getCurrentBet():
+            return Decision(action, amount)
+    return None
 
-    if len(frecuencias) != 52:
-        faltan = 52 - len(frecuencias)
-        print(
-            f"[AVISO] Faltan {faltan} cartas por aparecer; puede que el mazo no se baraje."
-        )
 
-    esperado = repartos * num_jugadores * 2 / 52
-    minimo = min(frecuencias.values())
-    maximo = max(frecuencias.values())
-    print(f"Frecuencia esperada por carta: ~{esperado:.0f}")
-    print(f"Frecuencia observada: min={minimo}, max={maximo}")
+def print_table(game):
+    print("\n" + "-" * 58)
+    print(
+        f"Mano {game.hand_number} | {game.state.name} | "
+        f"bote {game.pot} | board {cards(game.community)}"
+    )
+    for i, p in enumerate(game.players):
+        mark = "<-" if i == game.currentSeat() else "  "
+        status = "fold" if p.isFolded() else "all-in" if p.isAllIn() else ""
+        print(f"{mark} {p.getName():<8} stack={p.getChips():<5} apuesta={p.getCurrentBet():<5} {status}")
+    player = game.currentPlayer()
+    print(f"Por pagar: {max(0, game.current_bet - player.getCurrentBet())}")
 
-    return total_errores, frecuencias
+
+def on_action(game, event):
+    p = game.players[event["seat"]]
+    action = event["action"]
+    amount = f" {action.amount}" if action.amount else ""
+    print(f"{p.getName()}: {action.action.name.lower()}{amount} (stack {p.getChips()}, bote {game.pot})")
+
+
+def resolve_prompts(spec, count):
+    names = [n.strip() for n in spec.split(",") if n.strip()] or ["solid"]
+    try:
+        prompts = [get_prompt(name) for name in names]
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    return [prompts[i % len(prompts)] for i in range(count)]
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Juega poker Texas Hold'em contra bots Laya.")
+    p.add_argument("--players", type=int, default=4, help="jugadores totales, incluyéndote")
+    p.add_argument("--chips", type=int, default=1000)
+    p.add_argument("--small-blind", type=int, default=5)
+    p.add_argument("--big-blind", type=int, default=10)
+    p.add_argument("--hands", type=int, default=1)
+    p.add_argument("--model", default="convaiinnovations/laya")
+    p.add_argument("--prompts", default="solid", help=f"prompts de bots: {', '.join(PROMPTS)}")
+    p.add_argument("--min-confidence", type=float, default=0.0)
+    p.add_argument("--seed", type=int)
+    p.add_argument("--list-prompts", action="store_true")
+    return p.parse_args()
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Prueba el reparto de cartas del poker."
-    )
-    parser.add_argument(
-        "--jugadores", type=int, default=4, help="número de jugadores (por defecto 4)"
-    )
-    parser.add_argument(
-        "--repartos",
-        type=int,
-        default=0,
-        help="si es mayor que 0, repite ese número de repartos para comprobar aleatoriedad",
-    )
-    args = parser.parse_args()
+    args = parse_args()
+    if args.list_prompts:
+        print("\n".join(PROMPTS))
+        return
+    if not 2 <= args.players <= len(NAMES):
+        raise SystemExit(f"--players debe estar entre 2 y {len(NAMES)}")
+    if args.seed is not None:
+        random.seed(args.seed)
 
-    if args.jugadores < 1 or args.jugadores > 26:
-        parser.error("--jugadores debe estar entre 1 y 26 (52 cartas / 2 por jugador)")
+    players = [Player(NAMES[i], args.chips) for i in range(args.players)]
+    game = Game(players, small_blind=args.small_blind, big_blind=args.big_blind)
 
-    repartir_de_ejemplo(args.jugadores)
+    print("Cargando Laya...")
+    agent = load_agent(args.model)
+    prompts = resolve_prompts(args.prompts, args.players - 1)
+    bots = [HumanBot("Tú")] + [
+        LayaBot(
+            agent,
+            name=players[i + 1].getName(),
+            prompt=prompts[i],
+            min_confidence=args.min_confidence,
+        )
+        for i in range(args.players - 1)
+    ]
+    engine = BotEngine(game, bots, on_action=lambda event: on_action(game, event))
 
-    if args.repartos > 0:
-        probar_aleatoriedad(args.jugadores, args.repartos)
+    for _ in range(args.hands):
+        if sum(p.getChips() > 0 for p in players) < 2:
+            break
+        initial = [p.getChips() for p in players]
+        engine.play_hand()
+        print("\nShowdown")
+        print(f"Board: {cards(game.community)}")
+        for p in players:
+            delta = p.getChips() - initial[players.index(p)]
+            print(f"{p.getName():<8} {cards(p.getHand())} stack={p.getChips()} ({delta:+d})")
 
 
 if __name__ == "__main__":
     main()
-
-
-# --- Ejemplo antiguo de Laya (no relacionado con el reparto) ---
-# import laya
-#
-# agent = laya.load("convaiinnovations/laya")
-#
-# state = {
-#     "subject": "Error en producción",
-#     "body": "La API devuelve 500 y varios usuarios están afectados."
-# }
-#
-# questions = {
-#     "priority": {
-#         "type": "choice",
-#         "instructions": "¿Qué prioridad debería tener este incidente?",
-#         "criteria": {
-#             "low": "Problema menor sin impacto importante",
-#             "medium": "Impacto limitado",
-#             "high": "Servicio o usuarios seriamente afectados"
-#         }
-#     },
-#     "escalate": {
-#         "type": "noul",
-#         "instructions": "¿Este incidente debería escalarse?"
-#     }
-# }
-#
-# result = agent.predict(state, questions)
-#
-# print(result)
